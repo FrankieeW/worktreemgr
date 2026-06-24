@@ -4,6 +4,7 @@ pub mod control_store;
 pub mod discovery;
 pub mod domain;
 pub mod error;
+pub mod fs_plan;
 pub mod git_repo;
 pub mod manifest;
 

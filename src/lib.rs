@@ -5,6 +5,7 @@ pub mod discovery;
 pub mod domain;
 pub mod error;
 pub mod git_repo;
+pub mod manifest;
 
 use clap::Parser as _;
 

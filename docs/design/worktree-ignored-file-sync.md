@@ -92,6 +92,25 @@ until the user runs `wk add` or reruns discovery.
 
 Nested `.git` and `.wk` directories are never managed.
 
+### Copy Semantics
+
+Directory copies are overlay copies, not mirrors:
+
+- create missing directories and files
+- replace files only when the active operation explicitly owns that path
+- preserve symlinks as symlink entries instead of dereferencing them
+- leave destination-only files in place
+- never delete destination extras during `copy`, `apply`, or mode transitions
+
+Mirror semantics are not part of v1. Deletions happen only in `sync`, and only
+when a per-entry sync classification says that a tracked entry was deleted on
+one side while unchanged on the other side.
+
+When copying a directory that contains a symlink, `wk` copies the symlink itself.
+It does not follow or dereference the symlink. Absolute symlinks and symlinks
+that point outside the managed path are preserved but reported as warnings
+because they may dangle or point back into the source worktree.
+
 ### Worktree Identity
 
 `wk` discovers live worktrees from `git worktree list --porcelain` on every
@@ -120,6 +139,38 @@ state identity. Deleted worktree state is left alone until `wk prune`.
 `sync`
 : each target worktree gets a copy that can be synchronized with the source copy.
   This supports either manual sync or automatic sync.
+
+### Directory Sync Semantics
+
+`sync` supports files and directories. Directory sync is per-entry, never
+whole-directory replacement.
+
+For a managed directory, state stores a manifest of every tracked relative entry
+under that directory. Each file, symlink, and empty directory is classified
+independently against the last clean manifest:
+
+- unchanged
+- added on source
+- added on worktree
+- modified on source
+- modified on worktree
+- deleted on source
+- deleted on worktree
+- changed identically on both sides
+- changed differently on both sides
+
+Sync applies the safe per-entry plan:
+
+- source-only additions are copied to the worktree
+- worktree-only additions are copied to the source
+- one-sided modifications replace only that entry on the other side
+- one-sided deletions delete only that tracked entry on the other side
+- identical convergent changes refresh state without copying
+- conflicting entries remain untouched until resolved
+
+A directory-level sync must never resolve a conflict by replacing the whole
+directory. A resolution applies only to the conflicting entries selected by the
+user.
 
 ## Configuration
 
@@ -199,6 +250,14 @@ when the user explicitly configures it.
 10. Write `.wk/config.toml`.
 11. Optionally run `wk apply` for currently known worktrees.
 
+If config already exists, `wk init` is an idempotent merge:
+
+- preserve existing managed paths and their modes by default
+- prompt only for new discovered candidates
+- show missing source paths but do not delete their config entries automatically
+- update `.gitignore` idempotently
+- require `--reset` to re-prompt every existing managed path
+
 ### `wk add <path>`
 
 Add one or more new concrete paths after init.
@@ -215,15 +274,23 @@ settings as `wk init`, then runs the same migration rules as
 ### `wk apply [worktree]`
 
 Materialize configured paths into one target worktree or all live worktrees.
+Without an explicit worktree argument, `wk apply` targets all live non-source
+worktrees. The source/main worktree is never an apply target: its managed paths
+are the source copies, not destinations.
 
 Behavior by mode:
 
 - `ignore`: no-op.
-- `link`: create or repair symlink.
+- `link`: create symlink, or repair only a symlink that state records as
+  `wk`-created.
 - `copy`: copy only when the destination path does not exist.
 - `sync`: copy when missing; if `sync_policy = "auto"`, run sync for that path.
 
 `wk apply` must not overwrite an existing non-managed destination without asking.
+Foreign symlinks are existing non-managed destinations unless the user adopts
+them or replaces them interactively.
+
+`wk apply --dry-run` prints the planned filesystem operations and writes nothing.
 
 ### `wk status`
 
@@ -248,14 +315,23 @@ worktree fingerprints:
 If both sides changed but now have identical content, status is `clean` and the
 last clean fingerprints are refreshed.
 
+`wk status --json` emits machine-readable status. Exit codes:
+
+- `0`: clean
+- `1`: drift exists but no conflicts
+- `2`: at least one conflict exists
+- `3+`: command or repository error
+
 ### `wk sync [path] [worktree]`
 
 Synchronize `sync` paths through the source root as a hub.
+With no path or worktree arguments, `wk sync` means all sync paths in all live
+non-source worktrees.
 
 Manual policy:
 
-- If only source changed, copy source to worktree.
-- If only worktree changed, copy worktree to source.
+- If only source-side entries changed, apply those entry changes to the worktree.
+- If only worktree-side entries changed, apply those entry changes to the source.
 - If both changed to identical content, mark clean.
 - If both changed differently, use `conflict_policy`.
 - With `ask`, prompt the user and do not overwrite silently.
@@ -271,6 +347,8 @@ change back to source, worktree B will later observe "source changed only" and
 pull that change, unless B also has local edits. If B has local edits, B becomes
 a conflict even though the remote change originated in A. This is expected and
 must be visible in `wk status`.
+
+`wk sync --dry-run` prints the per-entry plan and writes nothing.
 
 ### `wk mode <path> <mode>`
 
@@ -289,6 +367,8 @@ Changing into `sync` accepts the same sync settings as `wk init`:
 
 Without flags, `manual` and `ask` are used.
 
+`wk mode --dry-run <path> <mode>` prints the migration plan and writes nothing.
+
 ### `wk prune`
 
 Discover live worktrees and remove state entries for worktrees that no longer
@@ -305,13 +385,22 @@ what would be removed; destructive cleanup requires confirmation or a force flag
 
 `wk` stops managing the path.
 
-Prompt for cleanup behavior:
+Prompt for cleanup behavior. For `copy` and `sync` destinations:
 
 - keep current files in each worktree
-- remove `wk`-created symlinks only
 - remove `wk` metadata and state only
 
 Default: keep files and remove only metadata/state. This avoids data loss.
+
+For `link` destinations, use link-specific wording:
+
+- convert the `wk`-created symlink to a standalone overlay copy, then unmanage it
+- remove the `wk`-created symlink
+- keep the live symlink unmanaged
+
+Default: convert the symlink to a standalone copy. Keeping a live symlink
+unmanaged is allowed only after an explicit warning because it continues sharing
+source content invisibly.
 
 ### `ignore` -> `link`
 
@@ -330,6 +419,11 @@ Symlink targets are relative paths from the destination parent to the source
 path. Relative links keep sibling worktrees movable as a group. A directory
 `link` is shared state: files created under the linked directory from any
 worktree are created in the source copy and become visible to all worktrees.
+
+When `wk` creates or adopts a link destination, it records symlink provenance in
+state. Future automatic repair is allowed only for a destination recorded as
+`wk`-created. A foreign symlink pointing anywhere else is treated like an
+existing user destination and must not be rewritten without confirmation.
 
 ### `ignore` -> `copy`
 
@@ -429,25 +523,28 @@ Default: skip when worktree content would be lost.
 `wk` stores state under `<main-worktree>/.wk/state/`. State is not intended for
 git.
 
-For each managed sync path and worktree, record:
+For each managed path and non-source worktree, record:
 
 - path
 - worktree identity
 - pair status: `uninitialized`, `clean`, or `conflict`
-- source fingerprint at last clean sync
-- worktree fingerprint at last clean sync
-- source modified time and size at last clean sync
-- worktree modified time and size at last clean sync
+- materialization provenance:
+  - destination kind: `missing`, `copy`, `sync-copy`, `symlink`, or `foreign`
+  - whether `wk` created or adopted the destination
+  - expected symlink target for `wk`-created links
+- source manifest at last clean sync
+- worktree manifest at last clean sync
 - conflict details when status is `conflict`
 
 A conflict is cleared only when the user selects a resolution through `wk sync`
-or `wk mode`, or when both sides converge to identical content and `wk status`
-refreshes the clean fingerprints.
+or `wk mode`, or when all conflicting entries converge to identical content and
+`wk status` refreshes the clean manifest.
 
-Fingerprints are content hashes. Directories are fingerprinted from a stable
-traversal of relative paths, file types, executable bits, symlink targets, and
-file contents. Empty directories contribute an explicit marker. Nested `.git`
-and `.wk` directories are excluded from traversal.
+Manifest entries contain content hashes, file type, executable bit, symlink
+target, size, and mtime. Directories are fingerprinted from a stable traversal of
+relative paths, file types, executable bits, symlink targets, and file contents.
+Empty directories contribute an explicit marker. Nested `.git` and `.wk`
+directories are excluded from traversal.
 
 For performance, mtime and size are a cheap pre-check. If both are unchanged
 from the last clean state, `wk` may skip rehashing. If either differs, `wk` must
@@ -468,6 +565,8 @@ rehash before deciding drift or conflict.
 - Hold `<main-worktree>/.wk/lock` while mutating config, state, backups, or
   managed filesystem entries. Concurrent `wk` runs must fail fast with a clear
   lock message.
+- Write config and state atomically with temp-file-plus-rename so a crash cannot
+  leave partial TOML or partial state files behind.
 
 ## Testing Strategy
 
@@ -478,9 +577,13 @@ Unit tests:
 - path discovery filtering and glob expansion into concrete entries
 - directory fingerprinting, including empty directories and nested `.git`/`.wk`
   exclusions
+- overlay copy planning for directories with destination-only files
+- per-entry directory sync planning for additions, modifications, deletions, and
+  conflicts
 - sync drift classification, including both-changed-identical convergence
 - mode transition planning
 - conflict status persistence and clearing
+- symlink provenance decisions for `wk`-created and foreign symlinks
 
 Integration tests:
 
@@ -491,6 +594,10 @@ Integration tests:
   `wk gc`
 - verify filesystem results
 - delete a worktree and verify stale state is pruned only by `wk prune`
+- verify `wk init` rerun preserves existing config and prompts only for new
+  candidates
+- verify source/main worktree is not an `apply` target
+- verify config/state writes are atomic under injected write failures
 
 CLI end-to-end tests:
 
@@ -501,6 +608,14 @@ CLI end-to-end tests:
 - `sync` fan-out from worktree A to source is visible to worktree B
 - `sync -> link` refuses to discard worktree-only content without confirmation
 - a new git worktree has no managed files until `wk apply` is run
+- directory `sync` preserves unique files on both sides and resolves conflicts
+  per entry
+- `link -> ignore` converts a `wk` symlink to a standalone copy by default
+- `wk apply` refuses to repair a foreign symlink without confirmation
+- `wk status --json` is parseable and exit codes distinguish clean, drift, and
+  conflict
+- `--dry-run` on `apply`, `sync`, and `mode` writes nothing
+- `wk sync` with no arguments targets all sync paths in all non-source worktrees
 
 ## Implementation Notes
 

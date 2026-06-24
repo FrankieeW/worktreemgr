@@ -111,6 +111,11 @@ It does not follow or dereference the symlink. Absolute symlinks and symlinks
 that point outside the managed path are preserved but reported as warnings
 because they may dangle or point back into the source worktree.
 
+Transition-time reconciliation uses the same overlay copy semantics. A transition
+must not make a directory identical to one side by deleting destination-only
+entries. Establishing the first clean sync manifest is a separate state step
+after the chosen overlay/import operation has completed.
+
 ### Worktree Identity
 
 `wk` discovers live worktrees from `git worktree list --porcelain` on every
@@ -122,6 +127,8 @@ command. State is keyed by a stable worktree identity:
 
 The current filesystem path of a worktree is treated as runtime data, not as the
 state identity. Deleted worktree state is left alone until `wk prune`.
+`main` is a source-side reference identity only. Per-destination materialization
+state is recorded only for non-source worktrees.
 
 ### Modes
 
@@ -220,7 +227,8 @@ worktree-specific context.
 `ask` is the default. `newer` is best-effort and unsafe for conflict resolution
 because mtimes can be rewritten by copy tools, checkout operations, and clock
 skew. `newer` must never be selected as an automatic default; it is only allowed
-when the user explicitly configures it.
+when the user explicitly configures it. Interactive prompts must show this
+unsafe-mtime warning when the user selects `newer`.
 
 ## Commands
 
@@ -249,6 +257,9 @@ when the user explicitly configures it.
    - `newer`
 10. Write `.wk/config.toml`.
 11. Optionally run `wk apply` for currently known worktrees.
+
+If the user selects `newer`, the picker must show the unsafe-mtime warning from
+the configuration section before accepting the choice.
 
 If config already exists, `wk init` is an idempotent merge:
 
@@ -302,8 +313,8 @@ Show one row per managed path per live worktree:
 - copy drift for `copy`
 - sync drift or conflict for `sync`
 
-For `sync`, status compares the last clean fingerprints with current source and
-worktree fingerprints:
+For `sync`, status compares the last clean manifest with current source and
+worktree manifests:
 
 - clean
 - source changed only
@@ -313,7 +324,7 @@ worktree fingerprints:
 - uninitialized
 
 If both sides changed but now have identical content, status is `clean` and the
-last clean fingerprints are refreshed.
+last clean manifest is refreshed.
 
 `wk status --json` emits machine-readable status. Exit codes:
 
@@ -366,6 +377,8 @@ Changing into `sync` accepts the same sync settings as `wk init`:
 - `--conflict-policy ask|source|worktree|newer`
 
 Without flags, `manual` and `ask` are used.
+If `--conflict-policy newer` is passed, `wk` must print the unsafe-mtime warning
+before building the migration plan.
 
 `wk mode --dry-run <path> <mode>` prints the migration plan and writes nothing.
 
@@ -376,8 +389,10 @@ exist. `wk prune` must not remove backups.
 
 ### `wk gc`
 
-Remove old backups only after explicit user action. The default command shows
-what would be removed; destructive cleanup requires confirmation or a force flag.
+Remove old backups only after explicit user action. By default, `wk gc` previews
+backups older than 30 days. Destructive cleanup requires confirmation or
+`--force`. Users can override retention with `--older-than <duration>` and
+`--keep <count>`.
 
 ## Mode Transition Rules
 
@@ -427,12 +442,12 @@ existing user destination and must not be rewritten without confirmation.
 
 ### `ignore` -> `copy`
 
-Copy source into each target worktree only when missing.
+Overlay-copy source entries into each target worktree only when missing.
 
 If destination exists, prompt:
 
 - keep existing destination
-- replace from source after backup
+- overlay source entries after backup
 - skip this worktree
 
 Default: keep existing destination.
@@ -441,24 +456,27 @@ Default: keep existing destination.
 
 Initialize a sync pair for each target worktree.
 
-If destination is missing, copy source and record clean fingerprints.
+If destination is missing, overlay-copy source entries and record a clean
+manifest.
 
 If destination exists, prompt:
 
-- use source as canonical and overwrite destination after backup
-- use worktree destination as canonical and copy it back to source after backup
+- use source as canonical and overlay source entries onto the destination after
+  backup
+- use worktree destination as canonical and overlay destination entries back to
+  source after backup
 - mark as conflict and leave content untouched
 
 Default: mark as conflict and leave content untouched.
 
 ### `link` -> `copy`
 
-Replace the symlink with an independent copy of the source content.
+Replace the symlink with an independent overlay copy of the source content.
 
 If the symlink is correct:
 
 - remove symlink
-- copy source content to destination
+- overlay-copy source content to destination
 
 If the destination is not the expected symlink, treat it like an existing
 destination and prompt before changing it.
@@ -466,7 +484,7 @@ destination and prompt before changing it.
 ### `link` -> `sync`
 
 Replace the symlink with a copy of the source content and record clean sync
-fingerprints. This starts as "source and worktree are identical".
+manifests. This starts as "source and worktree are identical".
 
 If the destination is not the expected symlink, prompt before changing it.
 
@@ -486,12 +504,14 @@ Default: backup and replace only after explicit confirmation.
 
 Start tracking bidirectional drift.
 
-If source and destination content are identical, record clean fingerprints.
+If source and destination content are identical, record a clean manifest.
 
 If they differ, prompt:
 
-- source wins
-- worktree wins
+- use source as canonical by overlaying source entries onto the worktree after
+  backup
+- use worktree as canonical by overlaying worktree entries back to source after
+  backup
 - mark as conflict and do not overwrite
 
 Default: mark as conflict.
@@ -510,9 +530,10 @@ This can discard worktree-specific synced content, so it is conservative.
 Before replacing with symlink:
 
 - If clean, replace destination with symlink.
-- If only source changed, apply source then replace with symlink.
+- If only source-side entries changed, apply those entries then replace with
+  symlink.
 - If only worktree changed or both changed, prompt:
-  - sync worktree back to source, then link
+  - apply worktree-side entries back to source, then link
   - backup worktree content, then link to source
   - skip this worktree
 
@@ -541,7 +562,7 @@ or `wk mode`, or when all conflicting entries converge to identical content and
 `wk status` refreshes the clean manifest.
 
 Manifest entries contain content hashes, file type, executable bit, symlink
-target, size, and mtime. Directories are fingerprinted from a stable traversal of
+target, size, and mtime. Directory manifests are built from a stable traversal of
 relative paths, file types, executable bits, symlink targets, and file contents.
 Empty directories contribute an explicit marker. Nested `.git` and `.wk`
 directories are excluded from traversal.
@@ -549,6 +570,11 @@ directories are excluded from traversal.
 For performance, mtime and size are a cheap pre-check. If both are unchanged
 from the last clean state, `wk` may skip rehashing. If either differs, `wk` must
 rehash before deciding drift or conflict.
+
+For managed directories, `wk` must still enumerate the directory tree to detect
+added or deleted entries. The mtime/size fast path can skip content rehashing for
+unchanged entries after enumeration; it must not skip enumeration of a managed
+directory.
 
 ## Safety Rules
 
@@ -565,8 +591,15 @@ rehash before deciding drift or conflict.
 - Hold `<main-worktree>/.wk/lock` while mutating config, state, backups, or
   managed filesystem entries. Concurrent `wk` runs must fail fast with a clear
   lock message.
+- `wk status` is read-only and must not take the exclusive mutation lock. It
+  reads atomic state snapshots; if a state file changes while being read, it may
+  retry once before reporting a transient concurrent-update error.
 - Write config and state atomically with temp-file-plus-rename so a crash cannot
   leave partial TOML or partial state files behind.
+- Create `.wk/`, `.wk/state/`, and `.wk/backups/` with owner-only directory
+  permissions on Unix (`0700`). Write config, state, and backup files with
+  owner-only file permissions on Unix (`0600`). On non-Unix platforms, use the
+  closest available restrictive permissions.
 
 ## Testing Strategy
 
@@ -575,11 +608,12 @@ Unit tests:
 - config parse and serialization
 - common-dir based control-dir resolution
 - path discovery filtering and glob expansion into concrete entries
-- directory fingerprinting, including empty directories and nested `.git`/`.wk`
+- directory manifest hashing, including empty directories and nested `.git`/`.wk`
   exclusions
 - overlay copy planning for directories with destination-only files
 - per-entry directory sync planning for additions, modifications, deletions, and
   conflicts
+- directory manifest enumeration even when directory mtime/size appears unchanged
 - sync drift classification, including both-changed-identical convergence
 - mode transition planning
 - conflict status persistence and clearing
@@ -598,6 +632,11 @@ Integration tests:
   candidates
 - verify source/main worktree is not an `apply` target
 - verify config/state writes are atomic under injected write failures
+- verify `.wk` directories/files use restrictive permissions where the platform
+  supports them
+- verify `wk status` can read a stable snapshot while another command holds the
+  mutation lock
+- verify `wk gc --older-than` and `--keep` retention behavior
 
 CLI end-to-end tests:
 
@@ -626,7 +665,7 @@ Preferred Rust libraries:
 - `serde` and `toml` for config
 - `thiserror` for typed errors
 - `camino` for UTF-8 paths
-- `sha2` or `blake3` for content fingerprints
+- `sha2` or `blake3` for content hashes
 - `fs4` or an equivalent lockfile crate for `.wk/lock`
 - `assert_cmd` and `tempfile` for CLI integration tests
 

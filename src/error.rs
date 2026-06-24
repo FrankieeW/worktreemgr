@@ -14,6 +14,9 @@ pub enum WkError {
     #[error("I/O error")]
     Io(#[from] std::io::Error),
 
+    #[error("directory walk error")]
+    WalkDir(#[from] walkdir::Error),
+
     #[error("not a supported git repository: {reason}")]
     UnsupportedRepository { reason: String },
 

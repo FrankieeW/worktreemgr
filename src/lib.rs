@@ -10,6 +10,8 @@ pub mod fs_plan;
 pub mod git_repo;
 pub mod lock;
 pub mod manifest;
+pub mod materialize;
+pub mod mode_plan;
 pub mod state;
 
 use clap::Parser as _;

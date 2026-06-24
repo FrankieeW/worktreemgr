@@ -1,1 +1,29 @@
+# Local agent and AI tool state
 .codegraph
+.codex/
+.claude/
+.cursor/
+.continue/
+.windsurf/
+.aider*
+.cline/
+.roo/
+.crush/
+.gemini/
+.qodo/
+.omc/
+.omx/
+.opencode/
+.augment/
+
+# Local agent notes and per-worktree context
+AGENTS.local.md
+CLAUDE.local.md
+GEMINI.local.md
+CODEX.local.md
+docs/local/
+*.local.*
+
+# Superpowers / OMO local workflow state
+.omo/
+docs/superpowers/

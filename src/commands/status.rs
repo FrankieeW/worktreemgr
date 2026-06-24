@@ -11,7 +11,7 @@ use crate::{
     git_repo::{RepoContext, WorktreeId},
     manifest::{Manifest, build_manifest},
     materialize::relative_symlink_target,
-    state::{PairStatus, StateStore},
+    state::{PairStatus, PathState, StateStore},
 };
 
 #[derive(Serialize)]
@@ -140,11 +140,8 @@ fn sync_status(
     let Some(path_state) = state.load_path_state(path, worktree_id)? else {
         return Ok(RowStatus::Uninitialized);
     };
-    if path_state.status == PairStatus::Conflict {
-        return Ok(RowStatus::Conflict);
-    }
-    let base_source = path_state.source_manifest.unwrap_or_default();
-    let base_worktree = path_state.worktree_manifest.unwrap_or_default();
+    let base_source = path_state.source_manifest.clone().unwrap_or_default();
+    let base_worktree = path_state.worktree_manifest.clone().unwrap_or_default();
     let current_source = manifest_or_empty(&ctx.main_worktree.join(path.as_path()))?;
     let current_worktree = manifest_or_empty(&worktree_root.join(path.as_path()))?;
     let drift = classify_manifest_drift(
@@ -157,7 +154,20 @@ fn sync_status(
         return Ok(RowStatus::Conflict);
     }
     if drift.is_clean_after_refresh() {
+        let refreshed = PathState {
+            path: path.clone(),
+            worktree_id: worktree_id.clone(),
+            status: PairStatus::Clean,
+            provenance: path_state.provenance,
+            source_manifest: Some(current_source),
+            worktree_manifest: Some(current_worktree),
+            conflict: None,
+        };
+        state.save_path_state(&refreshed)?;
         return Ok(RowStatus::Clean);
+    }
+    if path_state.status == PairStatus::Conflict {
+        return Ok(RowStatus::Conflict);
     }
     Ok(RowStatus::Drift)
 }

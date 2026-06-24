@@ -87,10 +87,12 @@ pub(crate) fn plan_link(
         Err(error) if error.kind() == ErrorKind::NotFound => {
             plan.summary.push(format!("link {dest} -> {target}"));
             plan.fs_ops.push(FsOp::CopySymlink {
-                target,
+                target: target.clone(),
                 dest,
                 warning: None,
             });
+            plan.state_updates
+                .push(link_state_update(path, worktree, target));
         }
         Err(error) => return Err(error.into()),
         Ok(metadata) if metadata.file_type().is_symlink() => {
@@ -101,10 +103,12 @@ pub(crate) fn plan_link(
             if can_repair_symlink(state, path, &worktree.id)? {
                 plan.summary.push(format!("repair link {dest} -> {target}"));
                 plan.fs_ops.push(FsOp::CopySymlink {
-                    target,
+                    target: target.clone(),
                     dest,
                     warning: None,
                 });
+                plan.state_updates
+                    .push(link_state_update(path, worktree, target));
             } else {
                 plan.warnings
                     .push(format!("foreign symlink left untouched: {dest}"));
@@ -117,6 +121,26 @@ pub(crate) fn plan_link(
         }
     }
     Ok(plan)
+}
+
+fn link_state_update(
+    path: &ManagedPath,
+    worktree: &WorktreeInfo,
+    target: Utf8PathBuf,
+) -> StateUpdate {
+    StateUpdate::Save(PathState {
+        path: path.clone(),
+        worktree_id: worktree.id.clone(),
+        status: PairStatus::Clean,
+        provenance: MaterializationProvenance {
+            destination_kind: DestinationKind::Symlink,
+            created_or_adopted_by_wk: true,
+            expected_symlink_target: Some(target),
+        },
+        source_manifest: None,
+        worktree_manifest: None,
+        conflict: None,
+    })
 }
 
 pub(crate) fn plan_overlay_to_worktree(

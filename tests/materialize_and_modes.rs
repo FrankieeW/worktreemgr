@@ -29,6 +29,29 @@ fn apply_all_excludes_source_and_links_with_relative_target()
     Ok(())
 }
 
+#[test]
+fn link_apply_records_symlink_provenance() -> Result<(), Box<dyn std::error::Error>> {
+    let fixture = GitFixture::new()?;
+    fixture.write_file(".claude/settings.json", "{}")?;
+    let context = discover_repo(&fixture.main)?;
+    let config = config_for(".claude", Mode::Link)?;
+    let state = StateStore::new(&context.control_dir);
+
+    let plan = plan_apply(&context, &config, &state, &ApplyTarget::All)?;
+
+    assert!(plan.state_updates.iter().any(|update| {
+        matches!(
+            update,
+            StateUpdate::Save(path_state)
+                if path_state.path.as_str() == ".claude"
+                    && path_state.provenance.destination_kind == DestinationKind::Symlink
+                    && path_state.provenance.created_or_adopted_by_wk
+                    && path_state.provenance.expected_symlink_target.is_some()
+        )
+    }));
+    Ok(())
+}
+
 #[cfg(unix)]
 #[test]
 fn link_repair_only_applies_to_wk_created_symlink() -> Result<(), Box<dyn std::error::Error>> {

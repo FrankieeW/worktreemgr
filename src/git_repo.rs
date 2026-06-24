@@ -1,3 +1,5 @@
+use std::io::ErrorKind;
+
 use camino::{Utf8Path, Utf8PathBuf};
 use serde::{Deserialize, Serialize};
 
@@ -64,6 +66,7 @@ fn discover_worktrees(
         .lines()
         .filter_map(|line| line.strip_prefix("worktree "))
         .map(|path| worktree_info(main_worktree, git_common_dir, path))
+        .filter_map(Result::transpose)
         .collect::<Result<Vec<_>, _>>()?;
     worktrees.sort_by(|left, right| left.id.cmp(&right.id));
     Ok(worktrees)
@@ -73,19 +76,29 @@ fn worktree_info(
     main_worktree: &Utf8Path,
     git_common_dir: &Utf8Path,
     raw_path: &str,
-) -> Result<WorktreeInfo, WkError> {
-    let path = canonicalize_utf8(Utf8Path::new(raw_path))?;
+) -> Result<Option<WorktreeInfo>, WkError> {
+    let raw_path = Utf8Path::new(raw_path);
+    let path = match canonicalize_utf8(raw_path) {
+        Ok(path) => path,
+        Err(WkError::Io(error)) if error.kind() == ErrorKind::NotFound => {
+            if raw_path == main_worktree {
+                return Err(error.into());
+            }
+            return Ok(None);
+        }
+        Err(error) => return Err(error),
+    };
     let is_source = path == main_worktree;
     let id = if is_source {
         WorktreeId::main()
     } else {
         linked_worktree_id(&path, git_common_dir)?
     };
-    Ok(WorktreeInfo {
+    Ok(Some(WorktreeInfo {
         id,
         path,
         is_source,
-    })
+    }))
 }
 
 fn linked_worktree_id(path: &Utf8Path, git_common_dir: &Utf8Path) -> Result<WorktreeId, WkError> {

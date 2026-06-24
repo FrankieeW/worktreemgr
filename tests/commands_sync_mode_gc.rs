@@ -6,8 +6,8 @@ use predicates::prelude::*;
 use support::{GitFixture, empty_manifest, save_clean_state, sync_config};
 use wk::{
     atomic::ensure_private_dir,
-    config::{Config, save_config_atomic},
-    domain::{ConflictPolicy, ManagedPath, SyncPolicy},
+    config::{Config, load_config, save_config_atomic},
+    domain::{ConflictPolicy, ManagedPath, Mode, SyncPolicy},
     git_repo::{WorktreeId, discover_repo},
     lock::MutationLock,
     manifest::Manifest,
@@ -152,6 +152,26 @@ fn mode_choice_source_wins_is_driven_through_binary() -> TestResult {
 }
 
 #[test]
+fn sync_to_link_default_skip_keeps_config_in_sync_mode() -> TestResult {
+    let fixture = GitFixture::new()?;
+    fixture.write_file("docs/local/shared.md", "source")?;
+    fixture.write_linked_file("docs/local/shared.md", "worktree")?;
+    let context = discover_repo(&fixture.main)?;
+    save_config(&context, &sync_config()?)?;
+
+    AssertCommand::cargo_bin("wk")?
+        .current_dir(&fixture.main)
+        .args(["mode", "docs/local", "link"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("skipped"));
+
+    let config = load_config(&context.control_dir.join("config.toml"))?;
+    assert_eq!(config.paths[0].mode, Mode::Sync);
+    Ok(())
+}
+
+#[test]
 fn mode_newer_policy_emits_unsafe_mtime_warning() -> TestResult {
     let fixture = GitFixture::new()?;
     fixture.write_file("docs/local/source.md", "source")?;
@@ -192,6 +212,43 @@ fn mutating_command_fails_fast_when_lock_is_held() -> TestResult {
 }
 
 #[test]
+fn prune_handles_git_prunable_missing_worktree() -> TestResult {
+    let fixture = GitFixture::new()?;
+    let context = discover_repo(&fixture.main)?;
+    let state = StateStore::new(&context.control_dir);
+    let worktree_id = context
+        .non_source_worktrees()
+        .next()
+        .ok_or("missing worktree")?
+        .id
+        .clone();
+    let path = ManagedPath::parse("docs/local")?;
+    state.save_path_state(&PathState {
+        path: path.clone(),
+        worktree_id: worktree_id.clone(),
+        status: PairStatus::Clean,
+        provenance: MaterializationProvenance {
+            destination_kind: DestinationKind::SyncCopy,
+            created_or_adopted_by_wk: true,
+            expected_symlink_target: None,
+        },
+        source_manifest: Some(Manifest::default()),
+        worktree_manifest: Some(Manifest::default()),
+        conflict: None,
+    })?;
+    std::fs::remove_dir_all(&fixture.linked)?;
+
+    AssertCommand::cargo_bin("wk")?
+        .current_dir(&fixture.main)
+        .arg("prune")
+        .assert()
+        .success();
+
+    assert!(state.load_path_state(&path, &worktree_id)?.is_none());
+    Ok(())
+}
+
+#[test]
 fn prune_removes_stale_worktree_state_but_not_backups() -> TestResult {
     let fixture = GitFixture::new()?;
     let context = discover_repo(&fixture.main)?;
@@ -225,6 +282,27 @@ fn prune_removes_stale_worktree_state_but_not_backups() -> TestResult {
             .is_none()
     );
     assert!(backup.exists());
+    Ok(())
+}
+
+#[test]
+fn dry_run_gc_force_keeps_old_backups() -> TestResult {
+    let fixture = GitFixture::new()?;
+    let context = discover_repo(&fixture.main)?;
+    let backups = context.control_dir.join("backups");
+    ensure_private_dir(&backups)?;
+    let old = backups.join("old.txt");
+    write_file(&old, "old")?;
+    set_file_mtime(&old, FileTime::from_unix_time(946_684_800, 0))?;
+
+    AssertCommand::cargo_bin("wk")?
+        .current_dir(&fixture.main)
+        .args(["--dry-run", "gc", "--older-than", "30d", "--force"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("old.txt"));
+
+    assert!(old.exists());
     Ok(())
 }
 
@@ -267,6 +345,31 @@ fn gc_previews_old_backups_and_honors_keep_on_force() -> TestResult {
     assert!(!old_a.exists());
     assert!(old_b.exists());
     assert!(fresh.exists());
+    Ok(())
+}
+
+#[test]
+fn gc_removes_old_directory_backup_units() -> TestResult {
+    let fixture = GitFixture::new()?;
+    let context = discover_repo(&fixture.main)?;
+    let backups = context.control_dir.join("backups");
+    ensure_private_dir(&backups)?;
+    let old_dir = backups.join("old-dir");
+    write_file(&old_dir.join("nested.txt"), "old")?;
+    set_file_mtime(&old_dir, FileTime::from_unix_time(946_684_800, 0))?;
+    set_file_mtime(
+        old_dir.join("nested.txt"),
+        FileTime::from_unix_time(946_684_800, 0),
+    )?;
+
+    AssertCommand::cargo_bin("wk")?
+        .current_dir(&fixture.main)
+        .args(["gc", "--older-than", "30d", "--force"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("old-dir"));
+
+    assert!(!old_dir.exists());
     Ok(())
 }
 

@@ -12,7 +12,10 @@ use wk::{
     domain::{ConflictPolicy, ManagedPath, Mode, SyncPolicy},
     git_repo::discover_repo,
     manifest::build_manifest,
-    state::StateStore,
+    state::{
+        ConflictRecord, DestinationKind, MaterializationProvenance, PairStatus, PathState,
+        StateStore,
+    },
     ui::Prompter,
 };
 
@@ -242,6 +245,51 @@ fn status_reports_bad_link_target_as_drift() -> TestResult {
         .code(1)
         .stdout(predicate::str::contains("\"mode\":\"link\""))
         .stdout(predicate::str::contains("\"status\":\"drift\""));
+    Ok(())
+}
+
+#[test]
+fn status_clears_converged_sync_conflict_and_persists_clean_state() -> TestResult {
+    let fixture = GitFixture::new()?;
+    fixture.write_file("docs/local/shared.md", "resolved")?;
+    fixture.write_linked_file("docs/local/shared.md", "resolved")?;
+    let context = discover_repo(&fixture.main)?;
+    save_config(&context, &sync_config()?)?;
+    let worktree = context
+        .non_source_worktrees()
+        .next()
+        .ok_or("missing worktree")?;
+    let path = ManagedPath::parse("docs/local")?;
+    let state = StateStore::new(&context.control_dir);
+    state.save_path_state(&PathState {
+        path: path.clone(),
+        worktree_id: worktree.id.clone(),
+        status: PairStatus::Conflict,
+        provenance: MaterializationProvenance {
+            destination_kind: DestinationKind::SyncCopy,
+            created_or_adopted_by_wk: true,
+            expected_symlink_target: None,
+        },
+        source_manifest: Some(empty_manifest()),
+        worktree_manifest: Some(empty_manifest()),
+        conflict: Some(ConflictRecord {
+            entries: vec!["shared.md".into()],
+            message: "manual conflict".to_owned(),
+        }),
+    })?;
+
+    AssertCommand::cargo_bin("wk")?
+        .current_dir(&fixture.main)
+        .args(["status", "--json"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"status\":\"clean\""));
+
+    let refreshed = state
+        .load_path_state(&path, &worktree.id)?
+        .ok_or("missing refreshed state")?;
+    assert_eq!(refreshed.status, PairStatus::Clean);
+    assert!(refreshed.conflict.is_none());
     Ok(())
 }
 

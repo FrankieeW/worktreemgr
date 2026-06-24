@@ -4,7 +4,6 @@ use std::{
 };
 
 use camino::{Utf8Path, Utf8PathBuf};
-use walkdir::WalkDir;
 
 use crate::{error::WkError, git_repo::RepoContext};
 
@@ -19,6 +18,7 @@ pub fn run(
     force: bool,
     older_than: Option<&str>,
     keep: Option<usize>,
+    dry_run: bool,
 ) -> Result<ExitCode, WkError> {
     let backups = ctx.control_dir.join("backups");
     if !backups.exists() {
@@ -26,7 +26,7 @@ pub fn run(
     }
     let threshold = parse_duration(older_than.unwrap_or("30d"))?;
     let keep = keep.unwrap_or(0);
-    let mut candidates = old_backup_files(&backups, threshold)?;
+    let mut candidates = old_backup_units(&backups, threshold)?;
     candidates.sort_by(|left, right| {
         right
             .modified
@@ -35,30 +35,41 @@ pub fn run(
     });
     for candidate in candidates.into_iter().skip(keep) {
         println!("{}", candidate.path);
-        if force {
-            std::fs::remove_file(candidate.path)?;
+        if force && !dry_run {
+            remove_backup_unit(&candidate.path)?;
         }
     }
     Ok(ExitCode::SUCCESS)
 }
 
-fn old_backup_files(root: &Utf8Path, threshold: Duration) -> Result<Vec<BackupCandidate>, WkError> {
+fn old_backup_units(root: &Utf8Path, threshold: Duration) -> Result<Vec<BackupCandidate>, WkError> {
     let cutoff = SystemTime::now()
         .checked_sub(threshold)
         .ok_or_else(|| WkError::message("backup retention duration is too large".to_owned()))?;
     let mut candidates = Vec::new();
-    for entry in WalkDir::new(root).follow_links(false) {
+    for entry in std::fs::read_dir(root)? {
         let entry = entry?;
-        if !entry.file_type().is_file() {
+        let file_type = entry.file_type()?;
+        if !(file_type.is_file() || file_type.is_dir() || file_type.is_symlink()) {
             continue;
         }
-        let path = camino_path(entry.path())?;
+        let path = camino_path(&entry.path())?;
         let modified = entry.metadata()?.modified()?;
         if modified <= cutoff {
             candidates.push(BackupCandidate { path, modified });
         }
     }
     Ok(candidates)
+}
+
+fn remove_backup_unit(path: &Utf8Path) -> Result<(), WkError> {
+    let metadata = std::fs::symlink_metadata(path)?;
+    if metadata.file_type().is_dir() {
+        std::fs::remove_dir_all(path)?;
+        return Ok(());
+    }
+    std::fs::remove_file(path)?;
+    Ok(())
 }
 
 fn parse_duration(raw: &str) -> Result<Duration, WkError> {

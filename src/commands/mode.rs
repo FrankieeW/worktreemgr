@@ -48,7 +48,7 @@ pub fn run(
         },
     )?;
     execute_and_persist(&plan, &state, options.dry_run)?;
-    if !options.dry_run {
+    if !options.dry_run && should_update_config(&config, &path, target_mode, &plan) {
         upsert_config(
             &mut config,
             path,
@@ -59,6 +59,27 @@ pub fn run(
         save_config(ctx, &config)?;
     }
     Ok(ExitCode::SUCCESS)
+}
+
+fn should_update_config(
+    config: &Config,
+    path: &ManagedPath,
+    target_mode: Mode,
+    plan: &OperationPlan,
+) -> bool {
+    let current_mode = config
+        .paths
+        .iter()
+        .find(|path_config| path_config.path == *path)
+        .map_or(Mode::Ignore, |path_config| path_config.mode);
+    if current_mode == Mode::Sync
+        && target_mode == Mode::Link
+        && plan.fs_ops.is_empty()
+        && plan.state_updates.is_empty()
+    {
+        return false;
+    }
+    true
 }
 
 fn plan_mode(

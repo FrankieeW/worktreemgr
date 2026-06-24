@@ -111,6 +111,36 @@ fn foreign_symlink_is_not_repaired_without_confirmation() -> TestResult {
     Ok(())
 }
 
+#[cfg(unix)]
+#[test]
+fn wk_created_link_is_repaired_after_target_drift() -> TestResult {
+    let fixture = GitFixture::new()?;
+    fixture.write_file(".claude/settings.json", "{}")?;
+    let context = discover_repo(&fixture.main)?;
+    save_config(&context, &link_config()?)?;
+
+    AssertCommand::cargo_bin("wk")?
+        .current_dir(&fixture.main)
+        .arg("apply")
+        .assert()
+        .success();
+    std::fs::remove_file(fixture.linked.join(".claude"))?;
+    std::os::unix::fs::symlink("wrong-target", fixture.linked.join(".claude"))?;
+
+    AssertCommand::cargo_bin("wk")?
+        .current_dir(&fixture.main)
+        .arg("apply")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("repair link"));
+
+    assert_ne!(
+        std::fs::read_link(fixture.linked.join(".claude"))?,
+        std::path::PathBuf::from("wrong-target")
+    );
+    Ok(())
+}
+
 #[test]
 fn new_worktree_requires_manual_apply() -> TestResult {
     let fixture = GitFixture::new()?;

@@ -64,7 +64,7 @@ pub fn run_command(cli: Cli, cwd: &Utf8Path, prompter: &dyn Prompter) -> Result<
             force,
             older_than,
             keep,
-        } => gc::run(&ctx, force, older_than.as_deref(), keep),
+        } => gc::run(&ctx, force, older_than.as_deref(), keep, dry_run),
     }
 }
 
@@ -72,7 +72,7 @@ const fn command_mutates(command: &Command, dry_run: bool) -> bool {
     match command {
         Command::Init | Command::Add { .. } | Command::Prune => true,
         Command::Apply { .. } | Command::Sync { .. } | Command::Mode { .. } => !dry_run,
-        Command::Gc { force, .. } => *force,
+        Command::Gc { force, .. } => *force && !dry_run,
         Command::Status { .. } => false,
     }
 }

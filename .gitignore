@@ -25,5 +25,6 @@ docs/local/
 *.local.*
 
 # Superpowers / OMO local workflow state
+.wk/
 .omo/
 docs/superpowers/

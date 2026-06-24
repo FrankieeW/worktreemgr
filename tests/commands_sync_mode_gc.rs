@@ -9,6 +9,7 @@ use wk::{
     config::{Config, save_config_atomic},
     domain::{ConflictPolicy, ManagedPath, SyncPolicy},
     git_repo::{WorktreeId, discover_repo},
+    lock::MutationLock,
     manifest::Manifest,
     state::{DestinationKind, MaterializationProvenance, PairStatus, PathState, StateStore},
 };
@@ -102,6 +103,55 @@ fn mode_dry_run_sync_prints_plan_and_writes_nothing() -> TestResult {
 }
 
 #[test]
+fn mode_to_sync_initializes_state_for_missing_destination() -> TestResult {
+    let fixture = GitFixture::new()?;
+    fixture.write_file("docs/local/source.md", "source")?;
+    let context = discover_repo(&fixture.main)?;
+    save_config(&context, &empty_config())?;
+
+    AssertCommand::cargo_bin("wk")?
+        .current_dir(&fixture.main)
+        .args(["mode", "docs/local", "sync"])
+        .assert()
+        .success();
+
+    AssertCommand::cargo_bin("wk")?
+        .current_dir(&fixture.main)
+        .args(["status", "--json"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"status\":\"clean\""));
+    Ok(())
+}
+
+#[test]
+fn mode_choice_source_wins_is_driven_through_binary() -> TestResult {
+    let fixture = GitFixture::new()?;
+    fixture.write_file("docs/local/shared.md", "source")?;
+    fixture.write_linked_file("docs/local/shared.md", "worktree")?;
+    let context = discover_repo(&fixture.main)?;
+    save_config(&context, &empty_config())?;
+
+    AssertCommand::cargo_bin("wk")?
+        .current_dir(&fixture.main)
+        .args(["mode", "docs/local", "sync", "--choice", "source"])
+        .assert()
+        .success();
+
+    assert_eq!(
+        std::fs::read_to_string(fixture.linked.join("docs/local/shared.md"))?,
+        "source"
+    );
+    AssertCommand::cargo_bin("wk")?
+        .current_dir(&fixture.main)
+        .args(["status", "--json"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"status\":\"clean\""));
+    Ok(())
+}
+
+#[test]
 fn mode_newer_policy_emits_unsafe_mtime_warning() -> TestResult {
     let fixture = GitFixture::new()?;
     fixture.write_file("docs/local/source.md", "source")?;
@@ -121,6 +171,23 @@ fn mode_newer_policy_emits_unsafe_mtime_warning() -> TestResult {
         .assert()
         .success()
         .stderr(predicate::str::contains("mtime"));
+    Ok(())
+}
+
+#[test]
+fn mutating_command_fails_fast_when_lock_is_held() -> TestResult {
+    let fixture = GitFixture::new()?;
+    fixture.write_file("AGENTS.local.md", "agents")?;
+    let context = discover_repo(&fixture.main)?;
+    save_config(&context, &empty_config())?;
+    let _lock = MutationLock::acquire(&context.control_dir)?;
+
+    AssertCommand::cargo_bin("wk")?
+        .current_dir(&fixture.main)
+        .arg("apply")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("mutation lock"));
     Ok(())
 }
 
@@ -184,6 +251,13 @@ fn gc_previews_old_backups_and_honors_keep_on_force() -> TestResult {
         .stdout(predicate::str::contains("old-a.txt"))
         .stdout(predicate::str::contains("old-b.txt"));
     assert!(old_a.exists() && old_b.exists() && fresh.exists());
+
+    AssertCommand::cargo_bin("wk")?
+        .current_dir(&fixture.main)
+        .args(["gc", "--older-than", "720h"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("old-a.txt"));
 
     AssertCommand::cargo_bin("wk")?
         .current_dir(&fixture.main)

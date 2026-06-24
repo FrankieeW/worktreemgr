@@ -10,6 +10,7 @@ use crate::{
     error::WkError,
     git_repo::{RepoContext, WorktreeId},
     manifest::{Manifest, build_manifest},
+    materialize::relative_symlink_target,
     state::{PairStatus, StateStore},
 };
 
@@ -77,10 +78,11 @@ fn status_row(
     worktree_id: &WorktreeId,
     worktree_root: &Utf8Path,
 ) -> Result<StatusRow, WkError> {
-    let status = if mode == Mode::Sync {
-        sync_status(ctx, state, path, worktree_id, worktree_root)?
-    } else {
-        non_sync_status(worktree_root.join(path.as_path()).exists())
+    let status = match mode {
+        Mode::Ignore => RowStatus::Clean,
+        Mode::Link => link_status(ctx, path, worktree_root)?,
+        Mode::Copy => copy_status(ctx, path, worktree_root)?,
+        Mode::Sync => sync_status(ctx, state, path, worktree_id, worktree_root)?,
     };
     Ok(StatusRow {
         path: path.as_str().to_owned(),
@@ -88,6 +90,44 @@ fn status_row(
         mode,
         status,
     })
+}
+
+fn link_status(
+    ctx: &RepoContext,
+    path: &ManagedPath,
+    worktree_root: &Utf8Path,
+) -> Result<RowStatus, WkError> {
+    let source = ctx.main_worktree.join(path.as_path());
+    let dest = worktree_root.join(path.as_path());
+    let expected = relative_symlink_target(&source, &dest)?;
+    match std::fs::symlink_metadata(&dest) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            if read_link_utf8(&dest)? == expected {
+                return Ok(RowStatus::Clean);
+            }
+            Ok(RowStatus::Drift)
+        }
+        Ok(_metadata) => Ok(RowStatus::Drift),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(RowStatus::Uninitialized),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn copy_status(
+    ctx: &RepoContext,
+    path: &ManagedPath,
+    worktree_root: &Utf8Path,
+) -> Result<RowStatus, WkError> {
+    let dest = worktree_root.join(path.as_path());
+    if !dest_exists(&dest)? {
+        return Ok(RowStatus::Uninitialized);
+    }
+    let source = manifest_or_empty(&ctx.main_worktree.join(path.as_path()))?;
+    let worktree = build_manifest(&dest)?;
+    if source.has_same_content_identity(&worktree) {
+        return Ok(RowStatus::Clean);
+    }
+    Ok(RowStatus::Drift)
 }
 
 fn sync_status(
@@ -122,20 +162,26 @@ fn sync_status(
     Ok(RowStatus::Drift)
 }
 
-const fn non_sync_status(exists: bool) -> RowStatus {
-    if exists {
-        RowStatus::Clean
-    } else {
-        RowStatus::Uninitialized
-    }
-}
-
 fn manifest_or_empty(root: &Utf8Path) -> Result<Manifest, WkError> {
     match std::fs::symlink_metadata(root) {
         Ok(_metadata) => build_manifest(root),
         Err(error) if error.kind() == ErrorKind::NotFound => Ok(Manifest::default()),
         Err(error) => Err(error.into()),
     }
+}
+
+fn dest_exists(path: &Utf8Path) -> Result<bool, WkError> {
+    match std::fs::symlink_metadata(path) {
+        Ok(_metadata) => Ok(true),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn read_link_utf8(path: &Utf8Path) -> Result<camino::Utf8PathBuf, WkError> {
+    let target = std::fs::read_link(path)?;
+    camino::Utf8PathBuf::from_path_buf(target)
+        .map_err(|path| WkError::non_utf8_path(path.display().to_string()))
 }
 
 fn exit_code(rows: &[StatusRow]) -> ExitCode {

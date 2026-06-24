@@ -6,7 +6,7 @@ use crate::{
     config::{Config, PathConfig},
     domain::{ManagedPath, Mode},
     error::WkError,
-    fs_plan::{FsOp, plan_overlay_copy},
+    fs_plan::{FsOp, plan_overlay_copy_with_backups},
     git_repo::{RepoContext, WorktreeId, WorktreeInfo},
     manifest::build_manifest,
     state::{DestinationKind, MaterializationProvenance, PairStatus, PathState, StateStore},
@@ -126,7 +126,7 @@ pub(crate) fn plan_overlay_to_worktree(
 ) -> Result<OperationPlan, WkError> {
     let source = ctx.main_worktree.join(path.as_path());
     let dest = worktree.path.join(path.as_path());
-    let fs_ops = plan_overlay_copy(&source, &dest)?;
+    let fs_ops = plan_overlay_copy_with_backups(&source, &dest, &ctx.control_dir.join("backups"))?;
     Ok(OperationPlan {
         summary: vec![format!("overlay copy {source} -> {dest}")],
         fs_ops,
@@ -135,7 +135,7 @@ pub(crate) fn plan_overlay_to_worktree(
     })
 }
 
-fn plan_copy_if_missing(
+pub(crate) fn plan_copy_if_missing(
     ctx: &RepoContext,
     path: &ManagedPath,
     worktree: &WorktreeInfo,
@@ -208,7 +208,10 @@ fn dest_exists(path: &Utf8Path) -> Result<bool, WkError> {
     }
 }
 
-fn relative_symlink_target(source: &Utf8Path, dest: &Utf8Path) -> Result<Utf8PathBuf, WkError> {
+pub(crate) fn relative_symlink_target(
+    source: &Utf8Path,
+    dest: &Utf8Path,
+) -> Result<Utf8PathBuf, WkError> {
     let parent = dest
         .parent()
         .ok_or_else(|| WkError::message(format!("destination has no parent: {dest}")))?;

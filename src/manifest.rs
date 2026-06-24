@@ -17,6 +17,21 @@ pub struct Manifest {
     pub entries: BTreeMap<Utf8PathBuf, ManifestEntry>,
 }
 
+impl Manifest {
+    #[must_use]
+    pub fn has_same_content_identity(&self, other: &Self) -> bool {
+        if self.entries.len() != other.entries.len() {
+            return false;
+        }
+        self.entries.iter().all(|(path, entry)| {
+            other
+                .entries
+                .get(path)
+                .is_some_and(|other_entry| entry.has_same_content_identity(other_entry))
+        })
+    }
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EntryKind {
@@ -33,6 +48,16 @@ pub struct ManifestEntry {
     pub executable: bool,
     pub size: u64,
     pub mtime: i128,
+}
+
+impl ManifestEntry {
+    #[must_use]
+    pub fn has_same_content_identity(&self, other: &Self) -> bool {
+        self.kind == other.kind
+            && self.hash == other.hash
+            && self.target == other.target
+            && self.executable == other.executable
+    }
 }
 
 pub fn build_manifest(root: &Utf8Path) -> Result<Manifest, WkError> {

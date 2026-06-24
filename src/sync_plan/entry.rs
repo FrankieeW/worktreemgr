@@ -2,7 +2,7 @@ use camino::{Utf8Path, Utf8PathBuf};
 
 use crate::{
     error::WkError,
-    fs_plan::FsOp,
+    fs_plan::{FsOp, backup_path_op},
     manifest::{EntryKind, Manifest, ManifestEntry},
 };
 
@@ -14,17 +14,22 @@ pub(super) struct SyncEntry<'a> {
     pub(super) current_worktree: &'a Manifest,
 }
 
-pub(super) struct EntryPlan {
+pub(super) struct EntryPlan<'a> {
     fs_ops: Vec<FsOp>,
     removals: Vec<FsOp>,
     expected_source: Manifest,
     expected_worktree: Manifest,
     conflicts: Vec<Utf8PathBuf>,
     warnings: Vec<String>,
+    backup_root: &'a Utf8Path,
 }
 
-impl EntryPlan {
-    pub(super) const fn new(current_source: Manifest, current_worktree: Manifest) -> Self {
+impl<'a> EntryPlan<'a> {
+    pub(super) const fn new(
+        current_source: Manifest,
+        current_worktree: Manifest,
+        backup_root: &'a Utf8Path,
+    ) -> Self {
         Self {
             fs_ops: Vec::new(),
             removals: Vec::new(),
@@ -32,6 +37,7 @@ impl EntryPlan {
             expected_worktree: current_worktree,
             conflicts: Vec::new(),
             warnings: Vec::new(),
+            backup_root,
         }
     }
 
@@ -46,6 +52,7 @@ impl EntryPlan {
                 ops: &mut self.fs_ops,
                 removals: &mut self.removals,
                 expected: &mut self.expected_worktree,
+                backup_root: self.backup_root,
             },
         )
     }
@@ -61,6 +68,7 @@ impl EntryPlan {
                 ops: &mut self.fs_ops,
                 removals: &mut self.removals,
                 expected: &mut self.expected_source,
+                backup_root: self.backup_root,
             },
         )
     }
@@ -70,6 +78,7 @@ impl EntryPlan {
             self.removals.push(remove_entry_op(
                 existing,
                 &join_entry(entry.worktree_root, entry.entry_path),
+                self.backup_root,
             ));
         }
         self.expected_worktree.entries.remove(entry.entry_path);
@@ -80,6 +89,7 @@ impl EntryPlan {
             self.removals.push(remove_entry_op(
                 existing,
                 &join_entry(entry.source_root, entry.entry_path),
+                self.backup_root,
             ));
         }
         self.expected_source.entries.remove(entry.entry_path);
@@ -136,6 +146,7 @@ struct EntryBuffers<'a> {
     ops: &'a mut Vec<FsOp>,
     removals: &'a mut Vec<FsOp>,
     expected: &'a mut Manifest,
+    backup_root: &'a Utf8Path,
 }
 
 fn copy_or_delete_entry(
@@ -147,6 +158,12 @@ fn copy_or_delete_entry(
     buffers: &mut EntryBuffers<'_>,
 ) -> Result<(), WkError> {
     if let Some(entry) = source_entry {
+        if dest_entry.is_some_and(|existing| should_backup_before_copy(entry, existing)) {
+            buffers.ops.push(backup_path_op(
+                &join_entry(dest_root, entry_path),
+                buffers.backup_root,
+            ));
+        }
         buffers
             .ops
             .push(copy_entry_op(entry, source_root, dest_root, entry_path)?);
@@ -160,10 +177,15 @@ fn copy_or_delete_entry(
         buffers.removals.push(remove_entry_op(
             existing,
             &join_entry(dest_root, entry_path),
+            buffers.backup_root,
         ));
     }
     buffers.expected.entries.remove(entry_path);
     Ok(())
+}
+
+fn should_backup_before_copy(source: &ManifestEntry, dest: &ManifestEntry) -> bool {
+    source.kind != EntryKind::Directory || dest.kind != EntryKind::Directory
 }
 
 fn copy_entry_op(
@@ -190,14 +212,11 @@ fn copy_entry_op(
     }
 }
 
-fn remove_entry_op(entry: &ManifestEntry, path: &Utf8Path) -> FsOp {
+fn remove_entry_op(entry: &ManifestEntry, path: &Utf8Path, backup_root: &Utf8Path) -> FsOp {
     match entry.kind {
-        EntryKind::Directory => FsOp::RemoveEmptyDir {
-            path: path.to_path_buf(),
-        },
-        EntryKind::File | EntryKind::Symlink => FsOp::RemoveFile {
-            path: path.to_path_buf(),
-        },
+        EntryKind::Directory | EntryKind::File | EntryKind::Symlink => {
+            backup_path_op(path, backup_root)
+        }
     }
 }
 
@@ -227,11 +246,12 @@ fn remove_order(left: &FsOp, right: &FsOp) -> std::cmp::Ordering {
 
 fn remove_path(op: &FsOp) -> &Utf8Path {
     match op {
-        FsOp::RemoveFile { path } | FsOp::RemoveEmptyDir { path } => path,
+        FsOp::RemoveFile { path }
+        | FsOp::RemoveEmptyDir { path }
+        | FsOp::BackupPath { path, .. } => path,
         FsOp::CreateDir { .. }
         | FsOp::CopyFile { .. }
         | FsOp::CopySymlink { .. }
-        | FsOp::BackupPath { .. }
         | FsOp::WriteFileAtomic { .. }
         | FsOp::SetPermissions { .. } => Utf8Path::new(""),
     }

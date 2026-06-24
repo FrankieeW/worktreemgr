@@ -81,7 +81,12 @@ fn plan_pair_sync(
         &current_source,
         &current_worktree,
     );
-    let mut entry_plan = EntryPlan::new(current_source.clone(), current_worktree.clone());
+    let backup_root = ctx.control_dir.join("backups");
+    let mut entry_plan = EntryPlan::new(
+        current_source.clone(),
+        current_worktree.clone(),
+        &backup_root,
+    );
 
     for (entry_path, entry_drift) in &drift.entries {
         let sync_entry = SyncEntry {

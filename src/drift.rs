@@ -82,14 +82,24 @@ fn classify_entry(
     current_source: Option<&ManifestEntry>,
     current_worktree: Option<&ManifestEntry>,
 ) -> EntryDrift {
-    let source_changed = current_source != base_source;
-    let worktree_changed = current_worktree != base_worktree;
+    let source_changed = !same_entry_identity(current_source, base_source);
+    let worktree_changed = !same_entry_identity(current_worktree, base_worktree);
     match (source_changed, worktree_changed) {
         (false, false) => EntryDrift::Unchanged,
         (true, false) => source_only_drift(base_source, current_source),
         (false, true) => worktree_only_drift(base_worktree, current_worktree),
-        (true, true) if current_source == current_worktree => EntryDrift::BothChangedIdentically,
+        (true, true) if same_entry_identity(current_source, current_worktree) => {
+            EntryDrift::BothChangedIdentically
+        }
         (true, true) => EntryDrift::BothChangedDifferently,
+    }
+}
+
+fn same_entry_identity(left: Option<&ManifestEntry>, right: Option<&ManifestEntry>) -> bool {
+    match (left, right) {
+        (Some(left), Some(right)) => left.has_same_content_identity(right),
+        (None, None) => true,
+        (Some(_), None) | (None, Some(_)) => false,
     }
 }
 

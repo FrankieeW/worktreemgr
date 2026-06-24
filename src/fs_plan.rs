@@ -1,9 +1,12 @@
-use std::io::Write as _;
+use std::{
+    io::Write as _,
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
 
 use camino::{Utf8Path, Utf8PathBuf};
 use walkdir::{DirEntry, WalkDir};
 
-use crate::error::WkError;
+use crate::{atomic::ensure_private_dir, error::WkError};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum FsOp {
@@ -47,6 +50,29 @@ pub struct ExecutionReport {
 }
 
 pub fn plan_overlay_copy(source: &Utf8Path, dest: &Utf8Path) -> Result<Vec<FsOp>, WkError> {
+    plan_overlay_copy_inner(source, dest, None)
+}
+
+pub fn plan_overlay_copy_with_backups(
+    source: &Utf8Path,
+    dest: &Utf8Path,
+    backup_root: &Utf8Path,
+) -> Result<Vec<FsOp>, WkError> {
+    plan_overlay_copy_inner(source, dest, Some(backup_root))
+}
+
+pub(crate) fn backup_path_op(path: &Utf8Path, backup_root: &Utf8Path) -> FsOp {
+    FsOp::BackupPath {
+        path: path.to_path_buf(),
+        backup: backup_path(path, backup_root),
+    }
+}
+
+fn plan_overlay_copy_inner(
+    source: &Utf8Path,
+    dest: &Utf8Path,
+    backup_root: Option<&Utf8Path>,
+) -> Result<Vec<FsOp>, WkError> {
     let metadata = std::fs::symlink_metadata(source)?;
     let mut ops = Vec::new();
     if metadata.is_dir() {
@@ -59,10 +85,10 @@ pub fn plan_overlay_copy(source: &Utf8Path, dest: &Utf8Path) -> Result<Vec<FsOp>
             if relative.as_str().is_empty() {
                 continue;
             }
-            push_copy_op(&mut ops, &entry, &dest.join(relative))?;
+            push_copy_op(&mut ops, &entry, &dest.join(relative), backup_root)?;
         }
     } else {
-        push_copy_path_op(&mut ops, source, dest)?;
+        push_copy_path_op(&mut ops, source, dest, backup_root)?;
     }
     Ok(ops)
 }
@@ -89,16 +115,22 @@ pub fn execute_plan(ops: &[FsOp], dry_run: bool) -> Result<ExecutionReport, WkEr
     Ok(report)
 }
 
-fn push_copy_op(ops: &mut Vec<FsOp>, entry: &DirEntry, dest: &Utf8Path) -> Result<(), WkError> {
+fn push_copy_op(
+    ops: &mut Vec<FsOp>,
+    entry: &DirEntry,
+    dest: &Utf8Path,
+    backup_root: Option<&Utf8Path>,
+) -> Result<(), WkError> {
     let source = Utf8Path::from_path(entry.path())
         .ok_or_else(|| WkError::non_utf8_path(entry.path().display().to_string()))?;
-    push_copy_path_op(ops, source, dest)
+    push_copy_path_op(ops, source, dest, backup_root)
 }
 
 fn push_copy_path_op(
     ops: &mut Vec<FsOp>,
     source: &Utf8Path,
     dest: &Utf8Path,
+    backup_root: Option<&Utf8Path>,
 ) -> Result<(), WkError> {
     let metadata = std::fs::symlink_metadata(source)?;
     let file_type = metadata.file_type();
@@ -110,6 +142,7 @@ fn push_copy_path_op(
     }
     if file_type.is_symlink() {
         let target = read_link_utf8(source)?;
+        push_backup_if_replacing(ops, dest, backup_root)?;
         ops.push(FsOp::CopySymlink {
             warning: symlink_warning(&target),
             target,
@@ -118,6 +151,7 @@ fn push_copy_path_op(
         return Ok(());
     }
     if file_type.is_file() {
+        push_backup_if_replacing(ops, dest, backup_root)?;
         ops.push(FsOp::CopyFile {
             source: source.to_path_buf(),
             dest: dest.to_path_buf(),
@@ -137,8 +171,9 @@ fn execute_op(op: &FsOp) -> Result<(), WkError> {
         FsOp::RemoveFile { path } => std::fs::remove_file(path)?,
         FsOp::RemoveEmptyDir { path } => std::fs::remove_dir(path)?,
         FsOp::BackupPath { path, backup } => {
-            ensure_parent(backup)?;
+            ensure_backup_parent(backup)?;
             std::fs::rename(path, backup)?;
+            set_backup_permissions(backup)?;
         }
         FsOp::WriteFileAtomic { path, contents } => write_file_atomic(path, contents)?,
         FsOp::SetPermissions { path, mode } => set_permissions(path, *mode)?,
@@ -221,6 +256,24 @@ fn ensure_parent(path: &Utf8Path) -> Result<(), WkError> {
     Ok(())
 }
 
+fn ensure_backup_parent(path: &Utf8Path) -> Result<(), WkError> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| WkError::message(format!("backup path has no parent: {path}")))?;
+    ensure_private_dir(parent)
+}
+
+fn set_backup_permissions(path: &Utf8Path) -> Result<(), WkError> {
+    let metadata = std::fs::symlink_metadata(path)?;
+    if metadata.file_type().is_file() {
+        return set_permissions(path, 0o600);
+    }
+    if metadata.file_type().is_dir() {
+        return set_permissions(path, 0o700);
+    }
+    Ok(())
+}
+
 fn read_link_utf8(path: &Utf8Path) -> Result<Utf8PathBuf, WkError> {
     let target = std::fs::read_link(path)?;
     Utf8PathBuf::from_path_buf(target)
@@ -234,6 +287,59 @@ fn symlink_warning(target: &Utf8Path) -> Option<String> {
         ));
     }
     None
+}
+
+fn push_backup_if_replacing(
+    ops: &mut Vec<FsOp>,
+    dest: &Utf8Path,
+    backup_root: Option<&Utf8Path>,
+) -> Result<(), WkError> {
+    let Some(root) = backup_root else {
+        return Ok(());
+    };
+    match std::fs::symlink_metadata(dest) {
+        Ok(metadata) if metadata.file_type().is_file() || metadata.file_type().is_symlink() => {
+            ops.push(backup_path_op(dest, root));
+        }
+        Ok(metadata) if metadata.file_type().is_dir() => {}
+        Ok(_metadata) => {
+            return Err(WkError::message(format!(
+                "unsupported destination entry for backup: {dest}"
+            )));
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    Ok(())
+}
+
+fn backup_path(path: &Utf8Path, backup_root: &Utf8Path) -> Utf8PathBuf {
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, duration_nanos);
+    backup_root.join(format!("{timestamp}-{}", sanitize_path(path)))
+}
+
+fn duration_nanos(duration: Duration) -> u128 {
+    u128::from(duration.as_secs()) * 1_000_000_000_u128 + u128::from(duration.subsec_nanos())
+}
+
+fn sanitize_path(path: &Utf8Path) -> String {
+    let sanitized = path
+        .as_str()
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() {
+                character
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    if sanitized.is_empty() {
+        return "root".to_owned();
+    }
+    sanitized
 }
 
 fn operation_summary(op: &FsOp) -> String {

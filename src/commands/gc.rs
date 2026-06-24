@@ -62,12 +62,21 @@ fn old_backup_files(root: &Utf8Path, threshold: Duration) -> Result<Vec<BackupCa
 }
 
 fn parse_duration(raw: &str) -> Result<Duration, WkError> {
-    let days = raw
-        .strip_suffix('d')
-        .ok_or_else(|| WkError::message(format!("unsupported duration: {raw}")))?
+    let (amount, unit) = raw.split_at(raw.len().saturating_sub(1));
+    let amount = amount
         .parse::<u64>()
         .map_err(|error| WkError::message(error.to_string()))?;
-    Ok(Duration::from_secs(days * 24 * 60 * 60))
+    let seconds = match unit {
+        "s" => 1,
+        "m" => 60,
+        "h" => 60 * 60,
+        "d" => 24 * 60 * 60,
+        _ => return Err(WkError::message(format!("unsupported duration: {raw}"))),
+    };
+    amount
+        .checked_mul(seconds)
+        .map(Duration::from_secs)
+        .ok_or_else(|| WkError::message(format!("duration is too large: {raw}")))
 }
 
 fn camino_path(path: &std::path::Path) -> Result<Utf8PathBuf, WkError> {

@@ -132,6 +132,39 @@ fn classifies_every_per_entry_drift_variant() {
 }
 
 #[test]
+fn manifest_drift_uses_content_identity_not_mtime_or_size() {
+    let base_source = manifest_with_meta([("a", "one", 1, 1)]);
+    let base_worktree = manifest_with_meta([("a", "one", 1, 1)]);
+    let current_source = manifest_with_meta([("a", "one", 99, 99)]);
+    let current_worktree = manifest_with_meta([("a", "one", 101, 101)]);
+
+    let report = classify_manifest_drift(
+        &base_source,
+        &base_worktree,
+        &current_source,
+        &current_worktree,
+    );
+
+    assert_eq!(report.entries[Utf8Path::new("a")], EntryDrift::Unchanged);
+}
+
+#[test]
+fn identical_convergence_ignores_different_mtimes() {
+    let report = classify_manifest_drift(
+        &manifest([("a", "one")]),
+        &manifest([("a", "one")]),
+        &manifest_with_meta([("a", "two", 2, 10)]),
+        &manifest_with_meta([("a", "two", 2, 20)]),
+    );
+
+    assert_eq!(
+        report.entries[Utf8Path::new("a")],
+        EntryDrift::BothChangedIdentically
+    );
+    assert!(report.is_clean_after_refresh());
+}
+
+#[test]
 fn conflict_persists_until_convergence() -> Result<(), Box<dyn std::error::Error>> {
     let conflict = ConflictRecord {
         entries: vec![Utf8PathBuf::from("a")],
@@ -201,22 +234,28 @@ fn sample_path_state(
 }
 
 fn manifest<const N: usize>(entries: [(&str, &str); N]) -> Manifest {
+    manifest_with_meta(entries.map(|(path, hash)| (path, hash, 1, 1)))
+}
+
+fn manifest_with_meta<const N: usize>(entries: [(&str, &str, u64, i128); N]) -> Manifest {
     Manifest {
         entries: entries
             .into_iter()
-            .map(|(path, hash)| (Utf8PathBuf::from(path), file_entry(hash)))
+            .map(|(path, hash, size, mtime)| {
+                (Utf8PathBuf::from(path), file_entry(hash, size, mtime))
+            })
             .collect::<BTreeMap<_, _>>(),
     }
 }
 
-fn file_entry(hash: &str) -> ManifestEntry {
+fn file_entry(hash: &str, size: u64, mtime: i128) -> ManifestEntry {
     ManifestEntry {
         kind: EntryKind::File,
         hash: Some(hash.to_owned()),
         target: None,
         executable: false,
-        size: 1,
-        mtime: 1,
+        size,
+        mtime,
     }
 }
 

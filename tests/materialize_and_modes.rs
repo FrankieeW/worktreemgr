@@ -5,7 +5,7 @@ use wk::{
     domain::{ConflictPolicy, ManagedPath, Mode, SyncPolicy},
     fs_plan::{FsOp, execute_plan},
     git_repo::discover_repo,
-    materialize::{ApplyTarget, OperationPlan, plan_apply},
+    materialize::{ApplyTarget, OperationPlan, StateUpdate, plan_apply},
     mode_plan::{ModeOptions, TransitionChoice, plan_mode_change},
     state::{DestinationKind, MaterializationProvenance, PairStatus, PathState, StateStore},
 };
@@ -134,6 +134,116 @@ fn copy_to_sync_source_wins_uses_overlay_without_deleting_destination_unique_fil
         std::fs::read_to_string(fixture.linked.join("docs/local/worktree-only.md"))?,
         "worktree"
     );
+    Ok(())
+}
+
+#[test]
+fn ignore_to_copy_keeps_existing_destination_by_default() -> Result<(), Box<dyn std::error::Error>>
+{
+    let fixture = GitFixture::new()?;
+    fixture.write_file("AGENTS.local.md", "source")?;
+    fixture.write_linked_file("AGENTS.local.md", "worktree")?;
+    let context = discover_repo(&fixture.main)?;
+    let config = config_for("AGENTS.local.md", Mode::Ignore)?;
+    let state = StateStore::new(&context.control_dir);
+
+    let plan = plan_mode_change(
+        &context,
+        &config,
+        &state,
+        &ManagedPath::parse("AGENTS.local.md")?,
+        Mode::Copy,
+        ModeOptions {
+            dry_run: false,
+            choice: TransitionChoice::Default,
+        },
+    )?;
+    execute_plan(&plan.fs_ops, false)?;
+
+    assert_eq!(
+        std::fs::read_to_string(fixture.linked.join("AGENTS.local.md"))?,
+        "worktree"
+    );
+    Ok(())
+}
+
+#[test]
+fn sync_to_copy_keeps_worktree_content_and_removes_state() -> Result<(), Box<dyn std::error::Error>>
+{
+    let fixture = GitFixture::new()?;
+    fixture.write_file("docs/local/shared.md", "source")?;
+    fixture.write_linked_file("docs/local/shared.md", "worktree")?;
+    let context = discover_repo(&fixture.main)?;
+    let config = config_for("docs/local", Mode::Sync)?;
+    let state = StateStore::new(&context.control_dir);
+
+    let plan = plan_mode_change(
+        &context,
+        &config,
+        &state,
+        &ManagedPath::parse("docs/local")?,
+        Mode::Copy,
+        ModeOptions {
+            dry_run: false,
+            choice: TransitionChoice::Default,
+        },
+    )?;
+    execute_plan(&plan.fs_ops, false)?;
+
+    assert_eq!(
+        std::fs::read_to_string(fixture.linked.join("docs/local/shared.md"))?,
+        "worktree"
+    );
+    assert!(plan.state_updates.iter().any(|update| {
+        matches!(
+            update,
+            StateUpdate::Remove { path, .. } if path.as_str() == "docs/local"
+        )
+    }));
+    Ok(())
+}
+
+#[test]
+fn source_wins_transition_backs_up_replaced_files() -> Result<(), Box<dyn std::error::Error>> {
+    let fixture = GitFixture::new()?;
+    fixture.write_file("docs/local/shared.md", "source")?;
+    fixture.write_linked_file("docs/local/shared.md", "worktree")?;
+    let context = discover_repo(&fixture.main)?;
+    let config = config_for("docs/local", Mode::Copy)?;
+    let state = StateStore::new(&context.control_dir);
+
+    let plan = plan_mode_change(
+        &context,
+        &config,
+        &state,
+        &ManagedPath::parse("docs/local")?,
+        Mode::Sync,
+        ModeOptions {
+            dry_run: false,
+            choice: TransitionChoice::SourceWins,
+        },
+    )?;
+    let backup = plan
+        .fs_ops
+        .iter()
+        .find_map(|op| match op {
+            FsOp::BackupPath { path, backup }
+                if path == &fixture.linked.join("docs/local/shared.md") =>
+            {
+                Some(backup.clone())
+            }
+            _ => None,
+        })
+        .ok_or("missing backup for replaced worktree file")?;
+    assert!(backup.starts_with(context.control_dir.join("backups")));
+
+    execute_plan(&plan.fs_ops, false)?;
+
+    assert_eq!(
+        std::fs::read_to_string(fixture.linked.join("docs/local/shared.md"))?,
+        "source"
+    );
+    assert_eq!(std::fs::read_to_string(backup)?, "worktree");
     Ok(())
 }
 

@@ -182,6 +182,69 @@ fn status_json_exit_codes_distinguish_clean_drift_and_conflict() -> TestResult {
     Ok(())
 }
 
+#[test]
+fn status_reports_copy_drift() -> TestResult {
+    let fixture = GitFixture::new()?;
+    fixture.write_file("AGENTS.local.md", "source")?;
+    fixture.write_linked_file("AGENTS.local.md", "worktree")?;
+    let context = discover_repo(&fixture.main)?;
+    save_config(
+        &context,
+        &Config {
+            version: 1,
+            default_sync_policy: SyncPolicy::Manual,
+            default_conflict_policy: ConflictPolicy::Ask,
+            paths: vec![PathConfig {
+                path: ManagedPath::parse("AGENTS.local.md")?,
+                mode: Mode::Copy,
+                sync_policy: None,
+                conflict_policy: None,
+            }],
+        },
+    )?;
+
+    AssertCommand::cargo_bin("wk")?
+        .current_dir(&fixture.main)
+        .args(["status", "--json"])
+        .assert()
+        .code(1)
+        .stdout(predicate::str::contains("\"mode\":\"copy\""))
+        .stdout(predicate::str::contains("\"status\":\"drift\""));
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn status_reports_bad_link_target_as_drift() -> TestResult {
+    let fixture = GitFixture::new()?;
+    fixture.write_file(".claude/settings.json", "{}")?;
+    std::os::unix::fs::symlink("elsewhere", fixture.linked.join(".claude"))?;
+    let context = discover_repo(&fixture.main)?;
+    save_config(
+        &context,
+        &Config {
+            version: 1,
+            default_sync_policy: SyncPolicy::Manual,
+            default_conflict_policy: ConflictPolicy::Ask,
+            paths: vec![PathConfig {
+                path: ManagedPath::parse(".claude")?,
+                mode: Mode::Link,
+                sync_policy: None,
+                conflict_policy: None,
+            }],
+        },
+    )?;
+
+    AssertCommand::cargo_bin("wk")?
+        .current_dir(&fixture.main)
+        .args(["status", "--json"])
+        .assert()
+        .code(1)
+        .stdout(predicate::str::contains("\"mode\":\"link\""))
+        .stdout(predicate::str::contains("\"status\":\"drift\""));
+    Ok(())
+}
+
 const fn cli(command: Command) -> Cli {
     Cli {
         non_interactive: true,

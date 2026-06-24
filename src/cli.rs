@@ -68,6 +68,12 @@ pub enum Command {
             help = "Conflict policy when changing into sync mode"
         )]
         conflict_policy: Option<CliConflictPolicy>,
+        #[arg(
+            long,
+            value_enum,
+            help = "Transition choice for mode changes that need reconciliation"
+        )]
+        choice: Option<CliTransitionChoice>,
     },
     #[command(about = "Remove state for deleted worktrees")]
     Prune,
@@ -115,4 +121,16 @@ pub enum CliConflictPolicy {
     Worktree,
     #[value(help = "Newer mtime wins; unsafe and never a default")]
     Newer,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+pub enum CliTransitionChoice {
+    #[value(help = "Use the conservative default for the transition")]
+    Default,
+    #[value(help = "Use the source copy as canonical")]
+    Source,
+    #[value(help = "Use the worktree copy as canonical")]
+    Worktree,
+    #[value(help = "Skip changes that would need reconciliation")]
+    Skip,
 }

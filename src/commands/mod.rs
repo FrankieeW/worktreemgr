@@ -19,6 +19,7 @@ use crate::{
     error::WkError,
     fs_plan::execute_plan,
     git_repo::{RepoContext, discover_repo},
+    lock::MutationLock,
     materialize::{OperationPlan, StateUpdate},
     state::StateStore,
     ui::Prompter,
@@ -26,26 +27,53 @@ use crate::{
 
 pub fn run_command(cli: Cli, cwd: &Utf8Path, prompter: &dyn Prompter) -> Result<ExitCode, WkError> {
     let ctx = discover_repo(cwd)?;
-    match cli.command {
+    let dry_run = cli.dry_run;
+    let command = cli.command;
+    let _lock = if command_mutates(&command, dry_run) {
+        Some(MutationLock::acquire(&ctx.control_dir)?)
+    } else {
+        None
+    };
+    match command {
         Command::Init => init::run(&ctx, prompter),
         Command::Add { path, force } => add::run(&ctx, prompter, &path, force),
-        Command::Apply { worktree } => apply::run(&ctx, worktree.as_deref(), cli.dry_run),
+        Command::Apply { worktree } => apply::run(&ctx, worktree.as_deref(), dry_run),
         Command::Status { json } => status::run(&ctx, json),
         Command::Sync { path, worktree } => {
-            sync::run(&ctx, path.as_deref(), worktree.as_deref(), cli.dry_run)
+            sync::run(&ctx, path.as_deref(), worktree.as_deref(), dry_run)
         }
         Command::Mode {
             path,
             mode,
             sync_policy,
             conflict_policy,
-        } => mode::run(&ctx, &path, mode, sync_policy, conflict_policy, cli.dry_run),
+            choice,
+        } => mode::run(
+            &ctx,
+            &path,
+            mode,
+            mode::ModeCommandOptions {
+                sync_policy,
+                conflict_policy,
+                choice,
+                dry_run,
+            },
+        ),
         Command::Prune => prune::run(&ctx),
         Command::Gc {
             force,
             older_than,
             keep,
         } => gc::run(&ctx, force, older_than.as_deref(), keep),
+    }
+}
+
+const fn command_mutates(command: &Command, dry_run: bool) -> bool {
+    match command {
+        Command::Init | Command::Add { .. } | Command::Prune => true,
+        Command::Apply { .. } | Command::Sync { .. } | Command::Mode { .. } => !dry_run,
+        Command::Gc { force, .. } => *force,
+        Command::Status { .. } => false,
     }
 }
 

@@ -5,16 +5,7 @@ use wk::{
     domain::{ConflictPolicy, ManagedPath, Mode, SyncPolicy},
     manifest::Manifest,
     state::{DestinationKind, MaterializationProvenance, PairStatus, PathState, StateStore},
-    sync_plan::SyncOptions,
 };
-
-pub const fn ask_manual(dry_run: bool) -> SyncOptions {
-    SyncOptions {
-        policy: SyncPolicy::Manual,
-        conflict_policy: ConflictPolicy::Ask,
-        dry_run,
-    }
-}
 
 pub fn sync_config() -> Result<Config, Box<dyn std::error::Error>> {
     Ok(Config {

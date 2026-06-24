@@ -1,5 +1,4 @@
-fn main() -> color_eyre::Result<()> {
+fn main() -> color_eyre::Result<std::process::ExitCode> {
     color_eyre::install()?;
-    wk::run()?;
-    Ok(())
+    Ok(wk::run()?)
 }

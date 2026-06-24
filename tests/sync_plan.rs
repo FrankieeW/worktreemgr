@@ -1,6 +1,6 @@
 mod support;
 
-use support::{GitFixture, ask_manual, empty_manifest, save_clean_state, sync_config};
+use support::{GitFixture, empty_manifest, save_clean_state, sync_config};
 use wk::{
     domain::{ConflictPolicy, SyncPolicy},
     fs_plan::execute_plan,
@@ -11,6 +11,14 @@ use wk::{
 };
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
+
+const fn ask_manual(dry_run: bool) -> SyncOptions {
+    SyncOptions {
+        policy: SyncPolicy::Manual,
+        conflict_policy: ConflictPolicy::Ask,
+        dry_run,
+    }
+}
 
 #[test]
 fn sync_all_unions_source_and_worktree_added_entries() -> TestResult {

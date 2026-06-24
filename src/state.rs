@@ -55,6 +55,19 @@ impl StateStore {
         Ok(Some(serde_json::from_slice(&contents)?))
     }
 
+    pub fn remove_path_state(
+        &self,
+        path: &ManagedPath,
+        worktree_id: &WorktreeId,
+    ) -> Result<(), WkError> {
+        let file = self.state_file(path, worktree_id);
+        match std::fs::remove_file(&file) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error.into()),
+        }
+    }
+
     fn state_file(&self, path: &ManagedPath, worktree_id: &WorktreeId) -> Utf8PathBuf {
         self.state_dir
             .join(worktree_id.as_str())

@@ -1,7 +1,11 @@
 pub mod add;
 pub mod apply;
+pub mod gc;
 pub mod init;
+pub mod mode;
+pub mod prune;
 pub mod status;
+pub mod sync;
 
 use std::process::ExitCode;
 
@@ -27,9 +31,21 @@ pub fn run_command(cli: Cli, cwd: &Utf8Path, prompter: &dyn Prompter) -> Result<
         Command::Add { path, force } => add::run(&ctx, prompter, &path, force),
         Command::Apply { worktree } => apply::run(&ctx, worktree.as_deref(), cli.dry_run),
         Command::Status { json } => status::run(&ctx, json),
-        Command::Sync { .. } | Command::Mode { .. } | Command::Prune | Command::Gc { .. } => {
-            Err(WkError::message("command is not wired yet".to_owned()))
+        Command::Sync { path, worktree } => {
+            sync::run(&ctx, path.as_deref(), worktree.as_deref(), cli.dry_run)
         }
+        Command::Mode {
+            path,
+            mode,
+            sync_policy,
+            conflict_policy,
+        } => mode::run(&ctx, &path, mode, sync_policy, conflict_policy, cli.dry_run),
+        Command::Prune => prune::run(&ctx),
+        Command::Gc {
+            force,
+            older_than,
+            keep,
+        } => gc::run(&ctx, force, older_than.as_deref(), keep),
     }
 }
 
@@ -101,6 +117,9 @@ pub(crate) fn execute_and_persist(
     dry_run: bool,
 ) -> Result<(), WkError> {
     let report = execute_plan(&plan.fs_ops, dry_run)?;
+    for summary in &plan.summary {
+        println!("{summary}");
+    }
     for operation in report.operations {
         println!("{operation}");
     }

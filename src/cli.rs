@@ -85,7 +85,7 @@ pub enum Command {
     },
 }
 
-#[derive(Clone, Debug, ValueEnum)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
 pub enum CliMode {
     #[value(help = "Do not manage the path")]
     Ignore,
@@ -97,7 +97,7 @@ pub enum CliMode {
     Sync,
 }
 
-#[derive(Clone, Debug, ValueEnum)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
 pub enum CliSyncPolicy {
     #[value(help = "Sync only when wk sync is run")]
     Manual,
@@ -105,7 +105,7 @@ pub enum CliSyncPolicy {
     Auto,
 }
 
-#[derive(Clone, Debug, ValueEnum)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
 pub enum CliConflictPolicy {
     #[value(help = "Ask before resolving")]
     Ask,

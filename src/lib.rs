@@ -13,6 +13,7 @@ pub mod manifest;
 pub mod materialize;
 pub mod mode_plan;
 pub mod state;
+pub mod sync_plan;
 
 use clap::Parser as _;
 

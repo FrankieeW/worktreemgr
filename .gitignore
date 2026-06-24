@@ -28,3 +28,6 @@ docs/local/
 .wk/
 .omo/
 docs/superpowers/
+
+# Rust build output
+target/

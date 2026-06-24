@@ -1,3 +1,4 @@
+pub mod atomic;
 pub mod cli;
 pub mod config;
 pub mod control_store;
@@ -6,6 +7,7 @@ pub mod domain;
 pub mod error;
 pub mod fs_plan;
 pub mod git_repo;
+pub mod lock;
 pub mod manifest;
 
 use clap::Parser as _;

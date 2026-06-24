@@ -27,6 +27,9 @@ pub enum WkError {
         stderr: String,
     },
 
+    #[error("mutation lock is already held: {path}")]
+    LockBusy { path: Utf8PathBuf },
+
     #[error("failed to parse TOML config")]
     TomlDeserialize(#[from] toml::de::Error),
 
@@ -70,5 +73,9 @@ impl WkError {
             args: args.join(" "),
             stderr,
         }
+    }
+
+    pub const fn lock_busy(path: Utf8PathBuf) -> Self {
+        Self::LockBusy { path }
     }
 }

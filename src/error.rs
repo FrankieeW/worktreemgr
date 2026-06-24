@@ -36,6 +36,9 @@ pub enum WkError {
     #[error("failed to serialize TOML config")]
     TomlSerialize(#[from] toml::ser::Error),
 
+    #[error("failed to read or write JSON state")]
+    Json(#[from] serde_json::Error),
+
     #[error("failed to persist atomic file at {path}")]
     Persist {
         path: Utf8PathBuf,

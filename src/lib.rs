@@ -4,11 +4,13 @@ pub mod config;
 pub mod control_store;
 pub mod discovery;
 pub mod domain;
+pub mod drift;
 pub mod error;
 pub mod fs_plan;
 pub mod git_repo;
 pub mod lock;
 pub mod manifest;
+pub mod state;
 
 use clap::Parser as _;
 
